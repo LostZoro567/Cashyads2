@@ -3,131 +3,139 @@ import logging
 import os
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters
+)
 from telegram.error import BadRequest
 
-# Import all handlers
+# ── Handlers ──────────────────────────────────────────────
 from handlers.watch_ads_handler import (
-    start, start_referral, web_app_data, balance, bonus, refer,
-    withdraw_menu, process_withdrawal, confirm_withdrawal, 
-    handle_payment_details, back_to_balance, back_methods, 
-    get_main_keyboard
+    start, start_referral, web_app_data,
+    balance, bonus, refer, spin, leaderboard,
+    withdraw_menu, process_withdrawal, confirm_withdrawal,
+    handle_payment_details, back_to_balance, back_methods,
+    withdrawal_status, get_main_keyboard,
 )
-from handlers.broadcast_handler import broadcast_handler, cleanup_handler
-from handlers.extra_handler import extra_handler
-from handlers.tasks_handler import tasks_handler
+from handlers.broadcast_handler import (
+    broadcast_handler, cleanup_handler,
+    setstatus_handler, pending_handler,
+)
+from handlers.extra_handler import extra          # plain async function — NOT a handler object
+from handlers.tasks_handler import (
+    tasks_handler, task_callback_handler,
+    handle_task_code_input,
+)
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing!")
+    raise ValueError("BOT_TOKEN missing in .env!")
+
 
 async def error_handler(update: Update, context):
-    """Log errors with full details"""
-    logging.error(f"Update {update} caused error {context.error}")
+    logging.error(f"Update {update} caused error: {context.error}")
     if isinstance(context.error, BadRequest):
-        logging.error(f"BadRequest: {context.error}")
+        logging.error(f"BadRequest detail: {context.error}")
 
-async def unknown(update: Update, context):
-    """Handle unknown commands"""
+
+async def unknown_command(update: Update, context):
     await update.message.reply_text(
-        "👇 <b>Use the buttons!</b>", 
-        reply_markup=get_main_keyboard(), 
+        "👇 <b>Use the buttons below!</b>",
+        reply_markup=get_main_keyboard(),
         parse_mode='HTML'
     )
+
+
+# ── Smart message router ───────────────────────────────────
+# Determines what to do with plain text messages that aren't buttons or commands.
+# Priority:
+#   1. Awaiting task code  → handle_task_code_input
+#   2. Awaiting payment details → handle_payment_details
+
+async def smart_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('awaiting_task_code'):
+        await handle_task_code_input(update, context)
+    elif 'withdrawal_method' in context.user_data:
+        await handle_payment_details(update, context)
+    else:
+        await unknown_command(update, context)
+
+
+# Needed for type hint in smart_text_handler
+from telegram.ext import ContextTypes
+
 
 async def main():
     from utils.supabase import db
     await db.init_table()
-    print("✅ Cashyads2 Ready!")
-    
+    print("✅ Cashyads v2 Ready!")
+
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add error handler
     app.add_error_handler(error_handler)
-    
-    # ============================================
-    # COMMAND HANDLERS
-    # ============================================
-    
-    # /start with referral code (MUST BE FIRST - with args)
-    app.add_handler(CommandHandler("start", start_referral, filters.Regex(".*"), has_args=True))
-    
-    # /code command (admin)
-    # app.add_handler(code_command)
-    
-    # Generic /start (no args) - LAST before message handlers
+
+    # ── COMMAND HANDLERS ──────────────────────────────────
+    # /start with referral arg MUST come before generic /start
+    app.add_handler(CommandHandler("start", start_referral, has_args=True))
     app.add_handler(CommandHandler("start", start))
-    
-    # ============================================
-    # MESSAGE HANDLERS (ORDER MATTERS!)
-    # ============================================
-    
-    # Main buttons - specific regex patterns
-    app.add_handler(MessageHandler(filters.Regex("^(Balance 💳)$"), balance))
-    app.add_handler(MessageHandler(filters.Regex("^(Bonus 🎁)$"), bonus))
-    app.add_handler(MessageHandler(filters.Regex("^(Refer and Earn 👥)$"), refer))
-    app.add_handler(MessageHandler(filters.Regex("^(Tasks 📋)$"), tasks_handler))
-    app.add_handler(MessageHandler(filters.Regex("^(Extra ➡️)$"), extra_handler.callback))
-    
-    # Web app data (ads completion)
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data))
-    
-    # ============================================
-    # TASK & CODE HANDLERS (MUST BE BEFORE payment)
-    # ============================================
-    # Code handler checks context internally - only processes if waiting for code/task
-    # app.add_handler(code_submit)
-    
-    # ============================================
-    # PAYMENT DETAILS (CATCH-ALL - LAST)
-    # ============================================
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(Watch Ads 💰|Balance 💳|Bonus 🎁|Refer and Earn 👥|Tasks 📋|Extra ➡️)$"),
-        handle_payment_details
-    ))
-    
-    # ============================================
-    # CALLBACK HANDLERS
-    # ============================================
-    
-    # Withdraw menu
-    app.add_handler(CallbackQueryHandler(withdraw_menu, pattern="^withdraw$"))
-    
-    # Withdraw method selection
-    app.add_handler(CallbackQueryHandler(process_withdrawal, pattern="^withdraw_"))
-    
-    # Confirm withdrawal
-    app.add_handler(CallbackQueryHandler(confirm_withdrawal, pattern="^confirm_withdraw_"))
-    
-    # Back buttons
-    app.add_handler(CallbackQueryHandler(back_methods, pattern="^back_methods$"))
-    app.add_handler(CallbackQueryHandler(back_to_balance, pattern="^back_balance$"))
-    
-    # ============================================
-    # ADMIN HANDLERS (Broadcast & Cleanup)
-    # ============================================
-    
+    app.add_handler(CommandHandler("status", withdrawal_status))
+
+    # Admin commands
     app.add_handler(broadcast_handler)
     app.add_handler(cleanup_handler)
-    
-    # ============================================
-    # FALLBACK HANDLER (Unknown commands)
-    # ============================================
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
-    
-    print("🤖 Cashyads2 FULLY LIVE! ✅")
+    app.add_handler(setstatus_handler)
+    app.add_handler(pending_handler)
+
+    # ── BUTTON / MENU MESSAGE HANDLERS ───────────────────
+    BUTTON_FILTER = (
+        "^(Watch Ads 💰|Balance 💳|Bonus 🎁|Refer and Earn 👥"
+        "|Tasks 📋|Extra ➡️|🎰 Spin|🏆 Leaderboard)$"
+    )
+
+    app.add_handler(MessageHandler(filters.Regex("^(Balance 💳)$"),         balance))
+    app.add_handler(MessageHandler(filters.Regex("^(Bonus 🎁)$"),           bonus))
+    app.add_handler(MessageHandler(filters.Regex("^(Refer and Earn 👥)$"),  refer))
+    app.add_handler(MessageHandler(filters.Regex("^(Tasks 📋)$"),           tasks_handler))
+    app.add_handler(MessageHandler(filters.Regex("^(Extra ➡️)$"),           extra))   # plain function ✅
+    app.add_handler(MessageHandler(filters.Regex("^(🎰 Spin)$"),            spin))
+    app.add_handler(MessageHandler(filters.Regex("^(🏆 Leaderboard)$"),     leaderboard))
+
+    # Web app data (ad completion from Mini App)
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data))
+
+    # ── CALLBACK QUERY HANDLERS ───────────────────────────
+    app.add_handler(CallbackQueryHandler(withdraw_menu,        pattern="^withdraw$"))
+    app.add_handler(CallbackQueryHandler(process_withdrawal,   pattern="^withdraw_"))
+    app.add_handler(CallbackQueryHandler(confirm_withdrawal,   pattern="^confirm_withdraw_"))
+    app.add_handler(CallbackQueryHandler(back_methods,         pattern="^back_methods$"))
+    app.add_handler(CallbackQueryHandler(back_to_balance,      pattern="^back_balance$"))
+    app.add_handler(CallbackQueryHandler(task_callback_handler,pattern="^task_"))
+
+    # ── CATCH-ALL TEXT HANDLER ────────────────────────────
+    # Handles: task code input, payment details, unknown text
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(BUTTON_FILTER),
+        smart_text_handler
+    ))
+
+    print("🤖 Cashyads v2 LIVE!")
     print("=" * 50)
-    print("✅ Command handlers registered")
-    print("✅ Message handlers registered")
-    print("✅ Callback handlers registered")
-    print("✅ Error handler registered")
+    print("✅ Coins system active (1000 coins = ₹10)")
+    print("✅ Streak system active")
+    print("✅ Daily spin active")
+    print("✅ Weekly leaderboard active")
+    print("✅ Real tasks system active")
+    print("✅ Withdrawal status tracking active")
+    print("✅ Admin /setstatus & /pending commands")
     print("=" * 50)
-    
+
     await app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     import nest_asyncio
