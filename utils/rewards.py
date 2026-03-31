@@ -1,5 +1,7 @@
 import random
 
-def generate_reward() -> float:
-    values = [3.0, 3.2, 3.5, 3.8, 4.0, 4.2, 4.5, 4.8, 5.0]
+# Kept for backward compatibility — main logic is in supabase.py COIN_REWARDS
+def generate_reward() -> int:
+    """Returns a random coin reward for watching one ad."""
+    values = [300, 320, 350, 380, 400, 420, 450, 480, 500]
     return random.choice(values)
