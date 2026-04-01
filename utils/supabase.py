@@ -569,4 +569,43 @@ class SupabaseDB:
             return False
 
 
+    async def generate_daily_codes(self) -> list:
+        """Generate 3 unique task codes for today. Admin calls this once per day."""
+        import string
+        try:
+            today = date.today().isoformat()
+            # Don't regenerate if already done today
+            r = self.client.table("daily_task_codes").select("id").eq("created_date", today).execute()
+            if r.data and len(r.data) >= 3:
+                print("✅ Daily codes already generated")
+                return await self.get_daily_codes()
+
+            # Delete yesterday's codes
+            self.client.table("daily_task_codes").delete().lt("created_date", today).execute()
+
+            codes = []
+            for task_num in range(1, 4):
+                code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+                codes.append({"task_number": task_num, "secret_code": code, "created_date": today})
+
+            self.client.table("daily_task_codes").insert(codes).execute()
+            print(f"📋 Generated codes: {[c['secret_code'] for c in codes]}")
+            return codes
+        except Exception as e:
+            print(f"❌ generate_daily_codes error: {e}")
+            return []
+
+    async def get_daily_codes(self) -> list:
+        """Get today's task codes (for admin display)."""
+        try:
+            today = date.today().isoformat()
+            r = self.client.table("daily_task_codes").select("*").eq(
+                "created_date", today
+            ).order("task_number").execute()
+            return r.data if r.data else []
+        except Exception as e:
+            print(f"⚠️ get_daily_codes error: {e}")
+            return []
+
+
 db = SupabaseDB()
