@@ -5,27 +5,9 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters
+    CallbackQueryHandler, ContextTypes, filters
 )
 from telegram.error import BadRequest
-
-# ── Handlers ──────────────────────────────────────────────
-from handlers.watch_ads_handler import (
-    start, start_referral, web_app_data,
-    balance, bonus, refer, spin, leaderboard,
-    withdraw_menu, process_withdrawal, confirm_withdrawal,
-    handle_payment_details, back_to_balance, back_methods,
-    withdrawal_status, get_main_keyboard,
-)
-from handlers.broadcast_handler import (
-    broadcast_handler, cleanup_handler,
-    setstatus_handler, pending_handler,
-)
-from handlers.extra_handler import extra          # plain async function — NOT a handler object
-from handlers.tasks_handler import (
-    tasks_handler, task_callback_handler,
-    handle_task_code_input,
-)
 
 load_dotenv()
 logging.basicConfig(
@@ -37,14 +19,32 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing in .env!")
 
+# ── Handlers ──────────────────────────────────────────────
+from handlers.watch_ads_handler import (
+    start, start_referral, web_app_data,
+    balance, bonus, refer, spin, leaderboard,
+    withdraw_menu, process_withdrawal, confirm_withdrawal,
+    handle_payment_details, back_to_balance, back_methods,
+    withdrawal_status, get_main_keyboard,
+)
+from handlers.broadcast_handler import (
+    broadcast_handler, cleanup_handler,
+    setstatus_handler, pending_handler, gencode_handler,
+)
+from handlers.extra_handler import extra
+from handlers.tasks_handler import (
+    tasks_handler, task_callback_handler,
+    handle_task_code_input,
+)
 
-async def error_handler(update: Update, context):
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Update {update} caused error: {context.error}")
     if isinstance(context.error, BadRequest):
         logging.error(f"BadRequest detail: {context.error}")
 
 
-async def unknown_command(update: Update, context):
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👇 <b>Use the buttons below!</b>",
         reply_markup=get_main_keyboard(),
@@ -53,10 +53,10 @@ async def unknown_command(update: Update, context):
 
 
 # ── Smart message router ───────────────────────────────────
-# Determines what to do with plain text messages that aren't buttons or commands.
 # Priority:
 #   1. Awaiting task code  → handle_task_code_input
 #   2. Awaiting payment details → handle_payment_details
+#   3. Anything else → unknown_command
 
 async def smart_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_task_code'):
@@ -65,10 +65,6 @@ async def smart_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await handle_payment_details(update, context)
     else:
         await unknown_command(update, context)
-
-
-# Needed for type hint in smart_text_handler
-from telegram.ext import ContextTypes
 
 
 async def main():
@@ -90,6 +86,7 @@ async def main():
     app.add_handler(cleanup_handler)
     app.add_handler(setstatus_handler)
     app.add_handler(pending_handler)
+    app.add_handler(gencode_handler)
 
     # ── BUTTON / MENU MESSAGE HANDLERS ───────────────────
     BUTTON_FILTER = (
