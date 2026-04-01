@@ -160,35 +160,20 @@ async def _handle_channel_task(query, user_id: int, context: ContextTypes.DEFAUL
 
 
 async def _handle_ads_task(query, user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Check if user has watched at least 5 ads since task tracking started today"""
-    daily_task = await db.get_user_daily_tasks(user_id)
-    # We track daily ads in a separate simple way: check task row
-    # Use task_completions to see if already done; if not, check ads count
+    """Check if user has watched at least 5 ads today"""
     today = date.today().isoformat()
+
+    # Check if already rewarded today
     try:
         r = db.client.table("task_completions").select("id").eq(
             "user_id", user_id
         ).eq("task_type", "watch_5_ads").eq("completed_date", today).execute()
         if r.data:
-            await query.edit_message_text("✅ <b>Already completed!</b>", parse_mode='HTML')
+            await query.edit_message_text("✅ <b>Already completed today!</b>", parse_mode='HTML')
             return
     except:
         pass
 
-    # Check daily ad count from daily_tasks table
-    ads_today = 0
-    if daily_task:
-        ads_today = int(daily_task.get("tasks_completed", 0))
-
-    # Fallback: use total from user (approximate — better than nothing)
-    user = await db.get_user(user_id)
-    if not user:
-        await query.edit_message_text("❌ Error. Try again.", parse_mode='HTML')
-        return
-
-    # We'll track daily ad watch count via a dedicated column or the daily_tasks table
-    # For now, we check if the user has watched >= 5 ads logged today
-    # The web_app_data handler must call db.increment_daily_ads(user_id) each watch
     daily_ads = await db.get_daily_ad_count(user_id)
 
     if daily_ads >= 5:
@@ -201,12 +186,12 @@ async def _handle_ads_task(query, user_id: int, context: ContextTypes.DEFAULT_TY
                 parse_mode='HTML'
             )
         else:
-            await query.edit_message_text("✅ <b>Already completed!</b>", parse_mode='HTML')
+            await query.edit_message_text("✅ <b>Already completed today!</b>", parse_mode='HTML')
     else:
         await query.edit_message_text(
             f"<b>📺 Watch 5 Ads Task</b>\n\n"
             f"Progress: <b>{daily_ads}/5 ads</b> watched today\n\n"
-            f"Watch {5 - daily_ads} more ads, then come back!",
+            f"Go watch {5 - daily_ads} more ad(s), then press Check Again!",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Check Again", callback_data="task_check_ads")]
             ]),
