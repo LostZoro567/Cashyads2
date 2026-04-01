@@ -3,7 +3,7 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 )
 from telegram.ext import ContextTypes
-from utils.supabase import db, coins_to_rs, MIN_WITHDRAW_COINS, MIN_REFERRALS
+from utils.supabase import db, coins_to_rs, MIN_WITHDRAW_COINS, MIN_REFERRALS, _week_start
 import os
 from datetime import date
 import json
@@ -354,13 +354,10 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     board_text = "\n".join(board_lines) if board_lines else "<i>No entries yet this week!</i>"
 
     user = await db.get_user(user_id)
-    ws = None
+    user_weekly = 0
     if user:
-        from utils.supabase import _week_start
         ws = _week_start()
         user_weekly = int(user.get("weekly_coins", 0)) if user.get("weekly_reset_date") == ws else 0
-    else:
-        user_weekly = 0
 
     await update.message.reply_text(
         f"<b>🏆 Weekly Leaderboard</b>\n"
