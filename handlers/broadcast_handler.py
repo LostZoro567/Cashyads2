@@ -189,7 +189,29 @@ async def pending_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-broadcast_handler = CommandHandler("broadcast", broadcast)
-cleanup_handler = CommandHandler("cleanup", cleanup)
-setstatus_handler = CommandHandler("setstatus", setstatus)
-pending_handler = CommandHandler("pending", pending_withdrawals)
+async def gencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: /gencode — generate today's 3 task codes and display them"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+
+    codes = await db.generate_daily_codes()
+    if not codes:
+        await update.message.reply_text("❌ Failed to generate codes. Check logs.")
+        return
+
+    lines = [f"Task {c['task_number']}: <code>{c['secret_code']}</code>" for c in codes]
+    await update.message.reply_text(
+        f"<b>🔑 Today's Task Codes ({date.today()})</b>\n\n"
+        + "\n".join(lines) +
+        "\n\n<i>Post these in your channel!\n"
+        "Each code can only be used once per user.</i>",
+        parse_mode='HTML'
+    )
+
+
+broadcast_handler  = CommandHandler("broadcast", broadcast)
+cleanup_handler    = CommandHandler("cleanup", cleanup)
+setstatus_handler  = CommandHandler("setstatus", setstatus)
+pending_handler    = CommandHandler("pending", pending_withdrawals)
+gencode_handler    = CommandHandler("gencode", gencode)
