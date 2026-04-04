@@ -100,7 +100,6 @@ async def start_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     raw = update.effective_message.web_app_data.data
-    print(f"📱 WEB_APP_DATA from {user_id}: {raw}")
 
     try:
         data = json.loads(raw)
@@ -109,15 +108,37 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.get("ad_completed"):
         result = await db.reward_ad_watch(user_id)
+        
+        # Handle the NO ENERGY scenario
+        if not result.get("success"):
+            if result.get("reason") == "no_energy":
+                mins = int(result["next_recharge_seconds"] // 60)
+                secs = int(result["next_recharge_seconds"] % 60)
+                await update.message.reply_text(
+                    f"<b>🔋 Out of Energy!</b>\n\n"
+                    f"You have 0/5 ⚡.\n"
+                    f"Please wait <b>{mins}m {secs}s</b> for your next energy point before watching more ads.",
+                    reply_markup=get_main_keyboard(),
+                    parse_mode='HTML'
+                )
+            return
+
         coins = result["coins"]
         total = result["total_coins"]
         ads = result["ads_watched"]
         milestone = result.get("milestone")
+        energy_left = result["energy_left"]
+
+        # Format the recharge timer
+        mins = int(result["next_recharge_seconds"] // 60)
+        secs = int(result["next_recharge_seconds"] % 60)
+        timer_text = f" (Next in {mins}m {secs}s)" if energy_left < 5 else " (MAX)"
 
         text = (
             f"<b>✅ Ad watched!</b>\n\n"
             f"🪙 <b>+{coins} coins</b>\n"
-            f"💳 Total: <b>{total:,} coins</b> (₹{coins_to_rs(total):.1f})\n"
+            f"💳 Total: <b>{total:,} coins</b>\n"
+            f"⚡ Energy: <b>{energy_left}/5</b>{timer_text}\n"
             f"📺 Ads watched today: {ads}"
         )
 
@@ -129,7 +150,6 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
-        print(f"✅ Ad reward: {user_id} +{coins} coins = {total}")
     else:
         await update.message.reply_text(
             "❌ <b>Ad cancelled!</b>\n\nTry again 🔄",
