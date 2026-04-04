@@ -9,8 +9,15 @@ from datetime import date
 import json
 
 
-def get_main_keyboard():
+def get_main_keyboard(user_id=None):
     mini_app_url = os.getenv("MINI_APP_URL", "https://teleadviewer.pages.dev/")
+    
+    # BULLETPROOF METHOD: Inject user_id directly into the URL
+    if user_id and mini_app_url:
+        # Clean the URL and add the parameter securely
+        base_url = mini_app_url.rstrip('/')
+        mini_app_url = f"{base_url}/?uid={user_id}"
+
     keyboard = []
 
     if mini_app_url:
