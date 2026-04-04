@@ -336,28 +336,44 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # LEADERBOARD
 # ============================================================
 
+# Drop-in replacement for the leaderboard() function in watch_ads_handler.py
+# Replace the entire leaderboard() function with this one.
+
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    top = await db.get_weekly_leaderboard(10)
-    rank = await db.get_user_rank(user_id)
 
-    medals = ["🥇", "🥈", "🥉"]
+    # Both queries run; user row likely cached already so get_user is free
+    top  = await db.get_weekly_leaderboard(10)
+    user = await db.get_user(user_id)
+
+    ws          = _week_start()
+    user_weekly = 0
+    rank        = 0
+
+    if user:
+        user_weekly = int(user.get("weekly_coins", 0)) if user.get("weekly_reset_date") == ws else 0
+
+    # Count rank from leaderboard list first (free, no extra DB call)
+    # Only fall back to DB rank if user isn't in top 10
+    user_in_top = False
+    medals      = ["🥇", "🥈", "🥉"]
     board_lines = []
+
     for i, entry in enumerate(top):
-        medal = medals[i] if i < 3 else f"{i+1}."
-        uname = entry.get("username", f"User{entry['user_id']}")
-        coins = int(entry.get("weekly_coins", 0))
-        # Highlight current user
-        marker = " ← you" if entry["user_id"] == user_id else ""
-        board_lines.append(f"{medal} @{uname} — <b>{coins:,} coins</b>{marker}")
+        medal  = medals[i] if i < 3 else f"{i+1}."
+        uid    = entry.get("user_id")
+        uname  = entry.get("username") or f"User{uid}"
+        coins  = int(entry.get("weekly_coins", 0))
+        marker = " ← <b>you</b>" if uid == user_id else ""
+        if uid == user_id:
+            user_in_top = True
+            rank = i + 1
+        board_lines.append(f"{medal} @{uname} — <b>{coins:,}</b>{marker}")
+
+    if not user_in_top:
+        rank = await db.get_user_rank(user_id)
 
     board_text = "\n".join(board_lines) if board_lines else "<i>No entries yet this week!</i>"
-
-    user = await db.get_user(user_id)
-    user_weekly = 0
-    if user:
-        ws = _week_start()
-        user_weekly = int(user.get("weekly_coins", 0)) if user.get("weekly_reset_date") == ws else 0
 
     await update.message.reply_text(
         f"<b>🏆 Weekly Leaderboard</b>\n"
