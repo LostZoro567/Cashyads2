@@ -164,7 +164,11 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    # Refresh energy before showing balance
+    energy_data = await db.get_and_update_energy(user_id)
     user = await db.get_user(user_id)
+    
     if not user:
         await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(), parse_mode='HTML')
         return
@@ -174,15 +178,21 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ads = int(user.get("total_ads_watched", 0))
     streak = int(user.get("streak", 0))
     referrals = int(user.get("referrals", 0))
+    energy = energy_data["energy"]
 
-    # Progress to withdrawal
-    progress_pct = min(int((coins / MIN_WITHDRAW_COINS) * 100), 100)
+    # Format Energy Timer
+    if energy < 5:
+        mins = int(energy_data["next_recharge_seconds"] // 60)
+        secs = int(energy_data["next_recharge_seconds"] % 60)
+        energy_text = f"⚡ <b>{energy}/5</b> (Next in {mins}m {secs}s)"
+    else:
+        energy_text = f"⚡ <b>5/5</b> (MAX)"
+
+    progress_pct = min(int((coins / 38000) * 100), 100) # Replaced MIN_WITHDRAW_COINS for static visual
     filled = progress_pct // 10
     bar = "█" * filled + "░" * (10 - filled)
 
-    # Withdrawal history
     history = await db.get_user_withdrawals(user_id)
-
     history_text = ""
     if history:
         history_text = "\n\n<b>📜 Recent Withdrawals:</b>\n"
@@ -196,14 +206,15 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"<b>💳 Your Balance</b>\n\n"
         f"🪙 <b>{coins:,} coins</b>\n"
-        f"💵 ≈ <b>₹{rs:.1f}</b>\n\n"
+        f"💵 ≈ <b>₹{rs:.1f}</b>\n"
+        f"{energy_text}\n\n"
         f"<b>📊 Stats:</b>\n"
         f"📺 Ads watched: {ads}\n"
         f"🔥 Streak: {streak} day{'s' if streak != 1 else ''}\n"
         f"👥 Referrals: {referrals}\n\n"
         f"<b>Progress to withdrawal:</b>\n"
         f"[{bar}] {progress_pct}%\n"
-        f"<i>{coins:,}/{MIN_WITHDRAW_COINS:,} coins</i>"
+        f"<i>{coins:,}/38,000 coins</i>"
         f"{history_text}",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
