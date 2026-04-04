@@ -57,7 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🪙 <b>1,000 coins = ₹10</b>\n"
         "💸 Min withdrawal: <b>38,000 coins = ₹380</b>\n\n"
         "<i>Start earning now! 🚀</i>",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
         parse_mode='HTML'
     )
 
@@ -95,7 +95,7 @@ async def start_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 <b>Tasks</b> — earn 2,500 coins per task\n\n"
         "🪙 <b>1,000 coins = ₹10</b>\n\n"
         "<i>Start earning now! 🚀</i>",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
         parse_mode='HTML'
     )
 
@@ -125,7 +125,7 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"<b>🔋 Out of Energy!</b>\n\n"
                     f"You have 0/5 ⚡.\n"
                     f"Please wait <b>{mins}m {secs}s</b> for your next energy point before watching more ads.",
-                    reply_markup=get_main_keyboard(),
+                    reply_markup=get_main_keyboard(user_id),
                     parse_mode='HTML'
                 )
             return
@@ -156,11 +156,11 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🪙 <b>+{milestone['bonus_coins']:,} bonus coins!</b>"
             )
 
-        await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+        await update.message.reply_text(text, reply_markup=get_main_keyboard(user_id), parse_mode='HTML')
     else:
         await update.message.reply_text(
             "❌ <b>Ad cancelled!</b>\n\nTry again 🔄",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
 
@@ -177,7 +177,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await db.get_user(user_id)
     
     if not user:
-        await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(), parse_mode='HTML')
+        await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(user_id), parse_mode='HTML')
         return
 
     coins = int(user.get("coins", 0))
@@ -260,7 +260,7 @@ async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"7 days = 2× bonus (1,000 coins)\n"
             f"30 days = 3× bonus (1,500 coins)\n\n"
             f"Come back tomorrow! 📅",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
     elif result.get("already_claimed"):
@@ -269,13 +269,13 @@ async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>⏳ Already Claimed!</b>\n\n"
             f"🔥 Current streak: <b>{streak} days</b>\n\n"
             f"Come back tomorrow for your next bonus! 📅",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
     else:
         await update.message.reply_text(
             "❌ Error claiming bonus. Please try again!",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
 
@@ -289,7 +289,7 @@ async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await db.get_user(user_id)
 
     if not user:
-        await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(), parse_mode='HTML')
+        await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(user_id), parse_mode='HTML')
         return
 
     referral_code = user.get("referral_code", "")
@@ -341,7 +341,7 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>🎰 Daily Spin</b>\n\n"
             "⏳ You've already spun today!\n\n"
             "Come back tomorrow for another free spin! 📅",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
         return
@@ -365,7 +365,7 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🪙 <b>+{prize['coins']} coins</b>\n"
         f"💳 Total: <b>{total:,} coins</b>\n\n"
         f"<i>Spin again tomorrow!</i>",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
         parse_mode='HTML'
     )
 
@@ -419,7 +419,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{board_text}\n\n"
         f"<b>Your position:</b> #{rank}\n"
         f"🪙 Your weekly coins: <b>{user_weekly:,}</b>",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
         parse_mode='HTML'
     )
 
@@ -550,7 +550,7 @@ async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_T
     if 'withdrawal_method' not in context.user_data:
         await update.message.reply_text(
             "❌ Session expired. Start withdrawal again from Balance.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
         return
@@ -561,7 +561,7 @@ async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_T
     if not result["success"]:
         await update.message.reply_text(
             "❌ Withdrawal failed. Please try again.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
         context.user_data.clear()
@@ -579,7 +579,7 @@ async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_T
         f"⏳ Processing: <b>5–7 working days</b>\n"
         f"💬 Support: @CashyadsSupportBot\n\n"
         f"<i>Use /status to check your withdrawal.</i>",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
         parse_mode='HTML'
     )
 
@@ -614,7 +614,7 @@ async def withdrawal_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not history:
         await update.message.reply_text(
             "📭 <b>No withdrawals found.</b>\n\nYou haven't made any withdrawal requests yet.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(user_id),
             parse_mode='HTML'
         )
         return
@@ -631,7 +631,7 @@ async def withdrawal_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "<b>📜 Your Withdrawal History</b>\n\n" + "\n\n".join(lines),
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
         parse_mode='HTML'
     )
 
