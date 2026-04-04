@@ -11,6 +11,8 @@ load_dotenv()
 COINS_PER_RS        = 100
 MIN_WITHDRAW_COINS  = 38000
 MIN_REFERRALS       = 12
+MAX_ENERGY = 5
+ENERGY_RECHARGE_MINUTES = 24
 
 COIN_REWARDS = {
     "ad_values":               [300, 320, 350, 380, 400, 420, 450, 480, 500],
@@ -214,6 +216,68 @@ class SupabaseDB:
             return 0
         return await self._add_coins_to_user(user, amount)
 
+    # ── Energy ( 5 energy in 2hr ) ─────────────────
+    
+    async def get_and_update_energy(self, user_id: int) -> dict:
+        user = await self.get_user(user_id)
+        if not user:
+            return {"energy": 0, "next_recharge_seconds": 0}
+
+        now = datetime.now()
+        
+        # Fallbacks for existing users who might not have these columns yet
+        current_energy = user.get("energy")
+        if current_energy is None:
+            current_energy = MAX_ENERGY
+            
+        last_update_str = user.get("last_energy_update")
+        if not last_update_str:
+            last_update = now
+        else:
+            try:
+                last_update = datetime.fromisoformat(last_update_str)
+            except:
+                last_update = now
+
+        # If energy is already full, reset the timer to 0
+        if current_energy >= MAX_ENERGY:
+            return {"energy": MAX_ENERGY, "next_recharge_seconds": 0, "last_update": last_update}
+
+        # Calculate time passed
+        time_passed = (now - last_update).total_seconds()
+        energy_to_add = int(time_passed // (ENERGY_RECHARGE_MINUTES * 60))
+
+        # Add regenerated energy
+        if energy_to_add > 0:
+            new_energy = min(MAX_ENERGY, current_energy + energy_to_add)
+            
+            # Keep the leftover seconds so the timer is perfectly accurate
+            remainder_seconds = time_passed % (ENERGY_RECHARGE_MINUTES * 60)
+            new_last_update = now - timedelta(seconds=remainder_seconds)
+            
+            # Update Database
+            update = {
+                "energy": new_energy,
+                "last_energy_update": new_last_update.isoformat()
+            }
+            self.client.table("users").update(update).eq("user_id", user_id).execute()
+            
+            # Update cache
+            cached = _cache_get(user_id) or user
+            cached.update(update)
+            _cache_set(user_id, cached)
+            
+            current_energy = new_energy
+            last_update = new_last_update
+
+        # Calculate exactly how many seconds until the next +1 energy
+        next_recharge_seconds = 0
+        if current_energy < MAX_ENERGY:
+            time_passed = (datetime.now() - last_update).total_seconds()
+            next_recharge_seconds = max(0, (ENERGY_RECHARGE_MINUTES * 60) - time_passed)
+
+        return {"energy": current_energy, "next_recharge_seconds": next_recharge_seconds, "last_update": last_update}
+    
     # ── AD WATCH (was 7+ queries, now 3) ─────────────────────────
 
     async def reward_ad_watch(self, user_id: int) -> dict:
