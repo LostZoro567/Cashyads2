@@ -12,6 +12,10 @@ COINS_PER_RS        = 100
 MIN_WITHDRAW_COINS  = 38000
 MIN_REFERRALS       = 12
 
+# Energy system
+MAX_ENERGY          = 5
+ENERGY_REGEN_SECS   = 24 * 60          # 1 energy per 24 minutes
+
 COIN_REWARDS = {
     "ad_values":               [300, 320, 350, 380, 400, 420, 450, 480, 500],
     "daily_bonus":             500,
@@ -49,9 +53,8 @@ def _week_start() -> str:
 
 
 # ── In-process cache (per-process, clears on restart) ────────
-# Stores: { user_id: {"data": {...}, "ts": datetime} }
 _user_cache: dict = {}
-_CACHE_TTL_SECONDS = 30   # cache user row for 30 s
+_CACHE_TTL_SECONDS = 30
 
 
 def _cache_get(user_id: int):
@@ -67,6 +70,64 @@ def _cache_set(user_id: int, data: dict):
 
 def _cache_del(user_id: int):
     _user_cache.pop(user_id, None)
+
+
+# ── Energy helpers (pure Python, no DB needed) ────────────────
+
+def _compute_energy(stored_energy: int, last_watch_ts) -> tuple[int, datetime | None]:
+    """
+    Given the stored energy value and the last-watch timestamp,
+    return (current_energy, updated_last_watch_dt).
+
+    Rules:
+      • Energy is capped at MAX_ENERGY.
+      • 1 energy regenerates every ENERGY_REGEN_SECS seconds.
+      • The regen clock starts from last_watch_ts (not now).
+    """
+    if stored_energy >= MAX_ENERGY or last_watch_ts is None:
+        return MAX_ENERGY, last_watch_ts
+
+    # Parse timestamp
+    if isinstance(last_watch_ts, str):
+        try:
+            last_dt = datetime.fromisoformat(last_watch_ts)
+        except ValueError:
+            return MAX_ENERGY, None
+    elif isinstance(last_watch_ts, datetime):
+        last_dt = last_watch_ts
+    else:
+        return MAX_ENERGY, None
+
+    now     = datetime.utcnow()
+    elapsed = (now - last_dt).total_seconds()
+    gained  = int(elapsed // ENERGY_REGEN_SECS)
+
+    if gained == 0:
+        return stored_energy, last_dt
+
+    new_energy = min(stored_energy + gained, MAX_ENERGY)
+    # Advance the anchor so fractional seconds aren't lost
+    new_last_dt = last_dt + timedelta(seconds=gained * ENERGY_REGEN_SECS)
+    return new_energy, new_last_dt
+
+
+def secs_until_next_energy(stored_energy: int, last_watch_ts) -> int:
+    """Seconds until the next energy unit regenerates (0 if already full)."""
+    current, _ = _compute_energy(stored_energy, last_watch_ts)
+    if current >= MAX_ENERGY or last_watch_ts is None:
+        return 0
+
+    if isinstance(last_watch_ts, str):
+        try:
+            last_dt = datetime.fromisoformat(last_watch_ts)
+        except ValueError:
+            return 0
+    else:
+        last_dt = last_watch_ts
+
+    elapsed = (datetime.utcnow() - last_dt).total_seconds()
+    remainder = ENERGY_REGEN_SECS - (elapsed % ENERGY_REGEN_SECS)
+    return max(0, int(remainder))
 
 
 class SupabaseDB:
@@ -115,9 +176,7 @@ class SupabaseDB:
             return False
 
     async def create_user_if_not_exists(self, user_id: int, username: str = ""):
-        # Use cache first — avoids DB hit on every /start
         if _cache_get(user_id) is not None:
-            # Just bump last_active cheaply (fire-and-forget style)
             try:
                 self.client.table("users").update(
                     {"last_active": date.today().isoformat()}
@@ -139,18 +198,23 @@ class SupabaseDB:
         referral_code = f"REF_{user_id}_{random.randint(1000,9999)}"
         ws = _week_start()
         user_data = {
-            "user_id":           user_id,
-            "username":          username or f"User{user_id}",
-            "coins":             0,
-            "referrals":         0,
-            "referral_code":     referral_code,
-            "total_ads_watched": 0,
-            "streak":            0,
-            "last_active":       date.today().isoformat(),
-            "last_bonus_date":   None,
-            "last_spin_date":    None,
-            "weekly_coins":      0,
-            "weekly_reset_date": ws,
+            "user_id":            user_id,
+            "username":           username or f"User{user_id}",
+            "coins":              0,
+            "referrals":          0,
+            "referral_code":      referral_code,
+            "total_ads_watched":  0,
+            "streak":             0,
+            "last_active":        date.today().isoformat(),
+            "last_bonus_date":    None,
+            "last_spin_date":     None,
+            "weekly_coins":       0,
+            "weekly_reset_date":  ws,
+            # Energy system columns — add these to your Supabase users table:
+            #   energy         integer  default 5
+            #   energy_last_watch  timestamptz  default null
+            "energy":             MAX_ENERGY,
+            "energy_last_watch":  None,
         }
         try:
             self.client.table("users").insert(user_data).execute()
@@ -161,7 +225,6 @@ class SupabaseDB:
             print(f"⚠️ Create user error: {e}")
 
     def _bump_total_users(self):
-        """Best-effort stats increment — not awaited."""
         try:
             r = self.client.table("bot_stats").select("total_users").eq("id", 1).execute()
             if r.data:
@@ -173,18 +236,76 @@ class SupabaseDB:
         except:
             pass
 
-    # ── COINS (single update, no extra get_user) ─────────────────
+    # ── ENERGY ──────────────────────────────────────────────────
+
+    async def get_energy_state(self, user_id: int) -> dict:
+        """
+        Returns current energy after applying regen.
+        dict keys: energy (int), secs_to_next (int), last_watch (datetime|None)
+        """
+        user = await self.get_user(user_id)
+        if not user:
+            return {"energy": 0, "secs_to_next": ENERGY_REGEN_SECS, "last_watch": None}
+
+        stored   = int(user.get("energy", MAX_ENERGY))
+        last_raw = user.get("energy_last_watch")
+        current, new_last = _compute_energy(stored, last_raw)
+
+        # Persist regen gain if anything changed
+        if current != stored or (new_last and str(new_last) != str(last_raw)):
+            update = {
+                "energy":            current,
+                "energy_last_watch": new_last.isoformat() if new_last else None,
+            }
+            try:
+                self.client.table("users").update(update).eq("user_id", user_id).execute()
+                cached = _cache_get(user_id) or {}
+                cached.update(update)
+                _cache_set(user_id, cached)
+            except Exception as e:
+                print(f"⚠️ energy regen persist error: {e}")
+
+        secs_next = secs_until_next_energy(current, new_last or last_raw)
+        return {"energy": current, "secs_to_next": secs_next, "last_watch": new_last or last_raw}
+
+    async def consume_energy(self, user_id: int) -> dict:
+        """
+        Attempt to spend 1 energy for watching an ad.
+        Returns {"ok": True, "energy_left": N} or {"ok": False, "secs_to_next": N}.
+        """
+        state = await self.get_energy_state(user_id)
+        current = state["energy"]
+
+        if current <= 0:
+            return {"ok": False, "secs_to_next": state["secs_to_next"]}
+
+        new_energy = current - 1
+        now_iso    = datetime.utcnow().isoformat()
+
+        update = {
+            "energy":            new_energy,
+            # Anchor the regen clock to NOW when energy drops below max
+            "energy_last_watch": now_iso,
+        }
+        try:
+            self.client.table("users").update(update).eq("user_id", user_id).execute()
+            cached = _cache_get(user_id) or {}
+            cached.update(update)
+            _cache_set(user_id, cached)
+        except Exception as e:
+            print(f"⚠️ consume_energy error: {e}")
+
+        print(f"⚡ {user_id}: energy {current} → {new_energy}")
+        return {"ok": True, "energy_left": new_energy}
+
+    # ── COINS ────────────────────────────────────────────────────
 
     async def get_coins(self, user_id: int) -> int:
         user = await self.get_user(user_id)
         return int(user.get("coins", 0)) if user else 0
 
     async def _add_coins_to_user(self, user: dict, amount: int) -> int:
-        """
-        Core coin update — takes an already-fetched user dict.
-        Does ONE DB write. Returns new total.
-        """
-        user_id  = user["user_id"]
+        user_id   = user["user_id"]
         new_total = max(0, int(user.get("coins", 0)) + amount)
         ws        = _week_start()
         user_ws   = user.get("weekly_reset_date", "")
@@ -198,23 +319,23 @@ class SupabaseDB:
         }
         try:
             self.client.table("users").update(update).eq("user_id", user_id).execute()
-            # Update cache in-place so next read is instant
             cached = _cache_get(user_id) or {}
             cached.update(update)
             _cache_set(user_id, cached)
-            print(f"🪙 {user_id}: {'+' if amount>=0 else ''}{amount} = {new_total}")
+            print(f"🪙 {user_id}: {'+' if amount >= 0 else ''}{amount} = {new_total}")
         except Exception as e:
             print(f"❌ coin update error: {e}")
         return new_total
 
     async def add_coins(self, user_id: int, amount: int) -> int:
-        """Public API — fetches user if needed."""
         user = await self.get_user(user_id)
         if not user:
             return 0
         return await self._add_coins_to_user(user, amount)
 
-    # ── AD WATCH (was 7+ queries, now 3) ─────────────────────────
+    # ── AD WATCH ─────────────────────────────────────────────────
+    # Energy is consumed BEFORE calling reward_ad_watch (in the handler).
+    # This method only handles coin rewards + stats.
 
     async def reward_ad_watch(self, user_id: int) -> dict:
         user = await self.get_user(user_id)
@@ -228,7 +349,6 @@ class SupabaseDB:
         weekly    = int(user.get("weekly_coins", 0)) if user_ws == ws else 0
         new_coins = max(0, int(user.get("coins", 0)) + coins)
 
-        # ONE single DB write for coins + ads counter
         update = {
             "coins":             new_coins,
             "weekly_coins":      weekly + coins,
@@ -241,13 +361,9 @@ class SupabaseDB:
         cached.update(update)
         _cache_set(user_id, cached)
 
-        # Daily ad counter — separate table, 1 upsert
         self._increment_daily_ads_sync(user_id)
-
-        # Referral commission — only if referrer exists (cached)
         self._pay_commission_sync(user_id, coins)
 
-        # Milestone check (pure math, no extra DB unless milestone hit)
         milestone = None
         milestones = {10: 1000, 50: 5000, 100: 10000, 500: 25000}
         if ads in milestones:
@@ -259,7 +375,6 @@ class SupabaseDB:
         return {"coins": coins, "total_coins": new_coins, "ads_watched": ads, "milestone": milestone}
 
     def _increment_daily_ads_sync(self, user_id: int):
-        """Fire-and-forget daily counter — doesn't block the reply."""
         try:
             today = date.today().isoformat()
             r = self.client.table("daily_ad_counts").select("count").eq(
@@ -277,7 +392,6 @@ class SupabaseDB:
             print(f"⚠️ daily_ads error: {e}")
 
     def _pay_commission_sync(self, new_user_id: int, coins_earned: int):
-        """Pay referrer commission — best-effort, doesn't block."""
         try:
             r = self.client.table("referral_history").select("referrer_id").eq(
                 "new_user_id", new_user_id
@@ -296,21 +410,18 @@ class SupabaseDB:
                 }).eq("user_id", referrer_id).execute()
                 ref_user["coins"] = max(0, int(ref_user.get("coins", 0)) + commission)
                 _cache_set(referrer_id, ref_user)
-            else:
-                # referrer not in cache — skip to avoid extra DB call
-                pass
         except Exception as e:
             print(f"⚠️ commission error: {e}")
 
-    # ── DAILY BONUS (was 3 writes, now 1) ───────────────────────
+    # ── DAILY BONUS ───────────────────────────────────────────────
 
     async def give_daily_bonus(self, user_id: int) -> dict:
         user = await self.get_user(user_id)
         if not user:
             return {"success": False, "already_claimed": False}
 
-        today_str       = date.today().isoformat()
-        last_bonus_raw  = str(user.get("last_bonus_date", "") or "")
+        today_str      = date.today().isoformat()
+        last_bonus_raw = str(user.get("last_bonus_date", "") or "")
 
         if last_bonus_raw[:10] == today_str:
             return {"success": False, "already_claimed": True, "streak": int(user.get("streak", 0))}
@@ -326,14 +437,13 @@ class SupabaseDB:
         else:
             streak = 1
 
-        multiplier  = 3 if streak >= 30 else (2 if streak >= 7 else 1)
+        multiplier   = 3 if streak >= 30 else (2 if streak >= 7 else 1)
         coins_earned = COIN_REWARDS["daily_bonus"] * multiplier
         ws           = _week_start()
         user_ws      = user.get("weekly_reset_date", "")
         weekly       = int(user.get("weekly_coins", 0)) if user_ws == ws else 0
         new_coins    = int(user.get("coins", 0)) + coins_earned
 
-        # ONE write: coins + streak + bonus date
         update = {
             "coins":             new_coins,
             "weekly_coins":      weekly + coins_earned,
@@ -348,7 +458,7 @@ class SupabaseDB:
 
         return {"success": True, "coins": coins_earned, "streak": streak, "multiplier": multiplier}
 
-    # ── SPIN (was 3 DB ops, now 1) ───────────────────────────────
+    # ── SPIN ──────────────────────────────────────────────────────
 
     async def can_spin(self, user_id: int) -> bool:
         user = await self.get_user(user_id)
@@ -384,7 +494,7 @@ class SupabaseDB:
 
         return {"success": True, "prize": prize, "total_coins": new_coins}
 
-    # ── REFERRAL ─────────────────────────────────────────────────
+    # ── REFERRAL ──────────────────────────────────────────────────
 
     async def process_referral(self, user_id: int, referrer_code: str) -> bool:
         if await self.user_already_referred(user_id):
@@ -410,7 +520,6 @@ class SupabaseDB:
             self.client.table("users").update(update).eq("user_id", referrer_id).execute()
             _cache_del(referrer_id)
 
-            # Milestone bonus (no extra get_user — use referrer dict)
             milestone_coins = {5: 2000, 10: 4000, 25: 10000, 50: 25000}.get(new_ref_count)
             if milestone_coins:
                 self.client.table("users").update({
@@ -430,7 +539,7 @@ class SupabaseDB:
             print(f"❌ Referral error: {e}")
             return False
 
-    # ── LEADERBOARD ──────────────────────────────────────────────
+    # ── LEADERBOARD ───────────────────────────────────────────────
 
     async def get_weekly_leaderboard(self, limit: int = 10) -> list:
         try:
@@ -444,7 +553,6 @@ class SupabaseDB:
             return []
 
     async def get_user_rank(self, user_id: int) -> int:
-        """Single query — count users with more weekly coins."""
         try:
             user = await self.get_user(user_id)
             if not user:
@@ -458,7 +566,7 @@ class SupabaseDB:
         except:
             return 0
 
-    # ── WITHDRAWAL ───────────────────────────────────────────────
+    # ── WITHDRAWAL ────────────────────────────────────────────────
 
     async def can_withdraw(self, user_id: int) -> dict:
         user = await self.get_user(user_id)
@@ -528,7 +636,7 @@ class SupabaseDB:
         except:
             return []
 
-    # ── TASKS ────────────────────────────────────────────────────
+    # ── TASKS ─────────────────────────────────────────────────────
 
     async def get_user_daily_tasks(self, user_id: int) -> dict:
         try:
@@ -613,7 +721,7 @@ class SupabaseDB:
             print(f"⚠️ complete_task error: {e}")
             return False
 
-    # ── ADMIN / BROADCAST ────────────────────────────────────────
+    # ── ADMIN / BROADCAST ─────────────────────────────────────────
 
     async def get_total_user_count(self) -> int:
         try:
@@ -656,7 +764,11 @@ class SupabaseDB:
                 return await self.get_daily_codes()
             self.client.table("daily_task_codes").delete().lt("created_date", today).execute()
             codes = [
-                {"task_number": n, "secret_code": ''.join(random.choices(string.ascii_uppercase + string.digits, k=8)), "created_date": today}
+                {
+                    "task_number": n,
+                    "secret_code": ''.join(random.choices(string.ascii_uppercase + string.digits, k=8)),
+                    "created_date": today,
+                }
                 for n in range(1, 4)
             ]
             self.client.table("daily_task_codes").insert(codes).execute()
