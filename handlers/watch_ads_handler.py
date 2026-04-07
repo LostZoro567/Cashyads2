@@ -3,10 +3,14 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 )
 from telegram.ext import ContextTypes
-from utils.supabase import db, coins_to_rs, MIN_WITHDRAW_COINS, MIN_REFERRALS, _week_start
+from utils.supabase import (
+    db, coins_to_rs, MIN_WITHDRAW_COINS, MIN_REFERRALS, _week_start,
+    MAX_ENERGY, ENERGY_REGEN_SECS,
+)
 import os
 from datetime import date
 import json
+import math
 
 
 def get_main_keyboard():
@@ -22,12 +26,26 @@ def get_main_keyboard():
     else:
         keyboard.append([KeyboardButton("Watch Ads 💰")])
 
-    keyboard.append([KeyboardButton("Balance 💳"),     KeyboardButton("Bonus 🎁")])
+    keyboard.append([KeyboardButton("Balance 💳"),        KeyboardButton("Bonus 🎁")])
     keyboard.append([KeyboardButton("Refer and Earn 👥"), KeyboardButton("Tasks 📋")])
-    keyboard.append([KeyboardButton("🎰 Spin"),        KeyboardButton("🏆 Leaderboard")])
+    keyboard.append([KeyboardButton("🎰 Spin"),           KeyboardButton("🏆 Leaderboard")])
     keyboard.append([KeyboardButton("Extra ➡️")])
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def _energy_bar(energy: int) -> str:
+    """Return a visual energy bar string, e.g. ⚡⚡⚡🔲🔲"""
+    filled  = "⚡" * energy
+    empty   = "🔲" * (MAX_ENERGY - energy)
+    return filled + empty
+
+
+def _fmt_regen(secs: int) -> str:
+    """Format seconds into 'Xm Ys'."""
+    m = secs // 60
+    s = secs % 60
+    return f"{m}m {s:02d}s"
 
 
 # ============================================================
@@ -35,13 +53,14 @@ def get_main_keyboard():
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id  = update.effective_user.id
     username = update.effective_user.username or f"User{user_id}"
     await db.create_user_if_not_exists(user_id, username)
 
     await update.message.reply_text(
         "<b>👋 Welcome to Cashyads!</b>\n\n"
         "💰 <b>Watch Ads</b> — earn 300–500 coins each\n"
+        "⚡ <b>Energy system:</b> 5 energy max, 1 regen per 24 min\n"
         "👥 <b>Refer friends</b> — earn 4,000 coins + 5% commission\n"
         "🎁 <b>Daily Bonus</b> — 500 coins (2× at 7-day streak, 3× at 30-day!)\n"
         "🎰 <b>Daily Spin</b> — win up to 5,000 coins free\n"
@@ -56,7 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id  = update.effective_user.id
     username = update.effective_user.username or f"User{user_id}"
 
     await db.create_user_if_not_exists(user_id, username)
@@ -82,6 +101,7 @@ async def start_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "<b>👋 Welcome to Cashyads!</b>\n\n"
         "💰 <b>Watch Ads</b> — earn 300–500 coins each\n"
+        "⚡ <b>Energy:</b> 5 max, 1 regen per 24 min\n"
         "👥 <b>Refer friends</b> — earn 4,000 coins + 5% commission\n"
         "🎁 <b>Daily Bonus</b> — 500 coins (streaks give 2×/3× multiplier!)\n"
         "🎰 <b>Daily Spin</b> — win up to 5,000 coins free\n"
@@ -94,48 +114,77 @@ async def start_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# AD WATCH
+# AD WATCH  (energy gating lives here)
 # ============================================================
 
 async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    raw = update.effective_message.web_app_data.data
+    raw     = update.effective_message.web_app_data.data
     print(f"📱 WEB_APP_DATA from {user_id}: {raw}")
 
     try:
         data = json.loads(raw)
-    except:
+    except Exception:
         data = {}
 
-    if data.get("ad_completed"):
-        result = await db.reward_ad_watch(user_id)
-        coins = result["coins"]
-        total = result["total_coins"]
-        ads = result["ads_watched"]
-        milestone = result.get("milestone")
-
-        text = (
-            f"<b>✅ Ad watched!</b>\n\n"
-            f"🪙 <b>+{coins} coins</b>\n"
-            f"💳 Total: <b>{total:,} coins</b> (₹{coins_to_rs(total):.1f})\n"
-            f"📺 Ads watched today: {ads}"
-        )
-
-        if milestone:
-            text += (
-                f"\n\n<b>🎖️ MILESTONE BONUS!</b>\n"
-                f"🎉 {milestone['ads']} ads watched!\n"
-                f"🪙 <b>+{milestone['bonus_coins']:,} bonus coins!</b>"
-            )
-
-        await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
-        print(f"✅ Ad reward: {user_id} +{coins} coins = {total}")
-    else:
+    if not data.get("ad_completed"):
         await update.message.reply_text(
             "❌ <b>Ad cancelled!</b>\n\nTry again 🔄",
             reply_markup=get_main_keyboard(),
             parse_mode='HTML'
         )
+        return
+
+    # ── Server-side energy check ──────────────────────────────
+    energy_result = await db.consume_energy(user_id)
+
+    if not energy_result["ok"]:
+        secs      = energy_result.get("secs_to_next", ENERGY_REGEN_SECS)
+        regen_str = _fmt_regen(secs)
+        await update.message.reply_text(
+            f"⚡ <b>Out of Energy!</b>\n\n"
+            f"{_energy_bar(0)}\n\n"
+            f"You can watch up to <b>{MAX_ENERGY} ads</b> per session.\n"
+            f"1 energy recharges every <b>24 minutes</b>.\n\n"
+            f"⏳ Next energy in: <b>{regen_str}</b>",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+
+    energy_left = energy_result["energy_left"]
+
+    # ── Reward coins ──────────────────────────────────────────
+    result    = await db.reward_ad_watch(user_id)
+    coins     = result["coins"]
+    total     = result["total_coins"]
+    ads       = result["ads_watched"]
+    milestone = result.get("milestone")
+
+    bar = _energy_bar(energy_left)
+
+    text = (
+        f"<b>✅ Ad watched!</b>\n\n"
+        f"🪙 <b>+{coins} coins</b>\n"
+        f"💳 Total: <b>{total:,} coins</b> (₹{coins_to_rs(total):.1f})\n"
+        f"📺 Ads watched: {ads}\n\n"
+        f"<b>⚡ Energy:</b> {bar} {energy_left}/{MAX_ENERGY}"
+    )
+
+    if energy_left == 0:
+        text += f"\n<i>Energy full recharge in {_fmt_regen(ENERGY_REGEN_SECS)}</i>"
+    else:
+        text += f"\n<i>{energy_left} ad{'s' if energy_left > 1 else ''} remaining</i>"
+
+    if milestone:
+        text += (
+            f"\n\n<b>🎖️ MILESTONE BONUS!</b>\n"
+            f"🎉 {milestone['ads']} ads watched!\n"
+            f"🪙 <b>+{milestone['bonus_coins']:,} bonus coins!</b>"
+        )
+
+    await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+    print(f"✅ Ad reward: {user_id} +{coins} coins = {total} | energy={energy_left}")
 
 
 # ============================================================
@@ -144,25 +193,30 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user = await db.get_user(user_id)
+    user    = await db.get_user(user_id)
     if not user:
         await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(), parse_mode='HTML')
         return
 
-    coins = int(user.get("coins", 0))
-    rs = coins_to_rs(coins)
-    ads = int(user.get("total_ads_watched", 0))
-    streak = int(user.get("streak", 0))
+    coins     = int(user.get("coins", 0))
+    rs        = coins_to_rs(coins)
+    ads       = int(user.get("total_ads_watched", 0))
+    streak    = int(user.get("streak", 0))
     referrals = int(user.get("referrals", 0))
 
     # Progress to withdrawal
     progress_pct = min(int((coins / MIN_WITHDRAW_COINS) * 100), 100)
-    filled = progress_pct // 10
-    bar = "█" * filled + "░" * (10 - filled)
+    filled       = progress_pct // 10
+    prog_bar     = "█" * filled + "░" * (10 - filled)
+
+    # Energy state
+    estate    = await db.get_energy_state(user_id)
+    e_current = estate["energy"]
+    e_bar     = _energy_bar(e_current)
+    e_regen   = _fmt_regen(estate["secs_to_next"]) if e_current < MAX_ENERGY else "full"
 
     # Withdrawal history
-    history = await db.get_user_withdrawals(user_id)
-
+    history      = await db.get_user_withdrawals(user_id)
     history_text = ""
     if history:
         history_text = "\n\n<b>📜 Recent Withdrawals:</b>\n"
@@ -181,8 +235,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📺 Ads watched: {ads}\n"
         f"🔥 Streak: {streak} day{'s' if streak != 1 else ''}\n"
         f"👥 Referrals: {referrals}\n\n"
-        f"<b>Progress to withdrawal:</b>\n"
-        f"[{bar}] {progress_pct}%\n"
+        f"<b>⚡ Energy:</b> {e_bar} {e_current}/{MAX_ENERGY}"
+        + (f"\n<i>Next recharge in {e_regen}</i>" if e_current < MAX_ENERGY else "\n<i>Energy full ✅</i>") +
+        f"\n\n<b>Progress to withdrawal:</b>\n"
+        f"[{prog_bar}] {progress_pct}%\n"
         f"<i>{coins:,}/{MIN_WITHDRAW_COINS:,} coins</i>"
         f"{history_text}",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -196,14 +252,13 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    result = await db.give_daily_bonus(user_id)
+    result  = await db.give_daily_bonus(user_id)
 
     if result.get("success"):
-        coins = result["coins"]
-        streak = result["streak"]
+        coins      = result["coins"]
+        streak     = result["streak"]
         multiplier = result["multiplier"]
 
-        streak_text = ""
         if streak >= 30:
             streak_text = "🔥 <b>30-DAY STREAK! 3× multiplier!</b>"
         elif streak >= 7:
@@ -248,19 +303,18 @@ async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user = await db.get_user(user_id)
+    user    = await db.get_user(user_id)
 
     if not user:
         await update.message.reply_text("❌ User not found!", reply_markup=get_main_keyboard(), parse_mode='HTML')
         return
 
     referral_code = user.get("referral_code", "")
-    referrals = int(user.get("referrals", 0))
-    bot_username = os.getenv("BOT_USERNAME", "Cashyadsbot")
-    link = f"https://t.me/{bot_username}?start={referral_code}"
-    share_url = f"https://t.me/share/url?url={link}&text=Join%20Cashyads%20and%20earn%20money%20watching%20ads%20%F0%9F%92%B0"
+    referrals     = int(user.get("referrals", 0))
+    bot_username  = os.getenv("BOT_USERNAME", "Cashyadsbot")
+    link          = f"https://t.me/{bot_username}?start={referral_code}"
+    share_url     = f"https://t.me/share/url?url={link}&text=Join%20Cashyads%20and%20earn%20money%20watching%20ads%20%F0%9F%92%B0"
 
-    # Referral milestones display
     next_milestone = None
     for m in [5, 10, 25, 50]:
         if referrals < m:
@@ -296,7 +350,7 @@ async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    result = await db.do_spin(user_id)
+    result  = await db.do_spin(user_id)
 
     if not result["success"]:
         await update.message.reply_text(
@@ -336,28 +390,21 @@ async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # LEADERBOARD
 # ============================================================
 
-# Drop-in replacement for the leaderboard() function in watch_ads_handler.py
-# Replace the entire leaderboard() function with this one.
-
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    # Both queries run; user row likely cached already so get_user is free
-    top  = await db.get_weekly_leaderboard(10)
-    user = await db.get_user(user_id)
+    top     = await db.get_weekly_leaderboard(10)
+    user    = await db.get_user(user_id)
 
     ws          = _week_start()
     user_weekly = 0
-    rank        = 0
 
     if user:
         user_weekly = int(user.get("weekly_coins", 0)) if user.get("weekly_reset_date") == ws else 0
 
-    # Count rank from leaderboard list first (free, no extra DB call)
-    # Only fall back to DB rank if user isn't in top 10
-    user_in_top = False
     medals      = ["🥇", "🥈", "🥉"]
     board_lines = []
+    user_in_top = False
+    rank        = 0
 
     for i, entry in enumerate(top):
         medal  = medals[i] if i < 3 else f"{i+1}."
@@ -395,12 +442,12 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton("💳 Paytm",          callback_data="withdraw_paytm")],
-        [InlineKeyboardButton("📱 UPI",             callback_data="withdraw_upi")],
-        [InlineKeyboardButton("🏦 Bank Transfer",   callback_data="withdraw_bank")],
-        [InlineKeyboardButton("💵 PayPal",          callback_data="withdraw_paypal")],
-        [InlineKeyboardButton("₿ USDT (TRC20)",     callback_data="withdraw_usdt")],
-        [InlineKeyboardButton("⬅️ Back",            callback_data="back_balance")],
+        [InlineKeyboardButton("💳 Paytm",         callback_data="withdraw_paytm")],
+        [InlineKeyboardButton("📱 UPI",            callback_data="withdraw_upi")],
+        [InlineKeyboardButton("🏦 Bank Transfer",  callback_data="withdraw_bank")],
+        [InlineKeyboardButton("💵 PayPal",         callback_data="withdraw_paypal")],
+        [InlineKeyboardButton("₿ USDT (TRC20)",    callback_data="withdraw_usdt")],
+        [InlineKeyboardButton("⬅️ Back",           callback_data="back_balance")],
     ]
     await query.edit_message_text(
         "<b>💳 Choose Payment Method</b>\n\n"
@@ -411,18 +458,17 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     await query.answer()
     user_id = query.from_user.id
 
-    # FIX: query.data is e.g. "withdraw_upi" — split correctly
-    method = query.data.split("_", 1)[1].upper()  # "withdraw_upi" → "UPI"
+    method = query.data.split("_", 1)[1].upper()
 
     check = await db.can_withdraw(user_id)
 
     if check["can"]:
         coins = check["coins"]
-        rs = check["rs"]
+        rs    = check["rs"]
         keyboard = [
             [InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_withdraw_{method}")],
             [InlineKeyboardButton("⬅️ Back",   callback_data="back_methods")],
@@ -453,19 +499,18 @@ async def process_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     await query.answer()
     user_id = query.from_user.id
 
-    # FIX: query.data = "confirm_withdraw_UPI" → split on "_", take last part
-    parts = query.data.split("_")
+    parts  = query.data.split("_")
     method = parts[-1].upper()
 
     coins = await db.get_coins(user_id)
-    rs = coins_to_rs(coins)
+    rs    = coins_to_rs(coins)
 
     context.user_data['withdrawal_method'] = method
-    context.user_data['withdrawal_coins'] = coins
+    context.user_data['withdrawal_coins']  = coins
 
     prompts = {
         "PAYTM":  (
@@ -507,7 +552,7 @@ async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text
+    text    = update.message.text
 
     if 'withdrawal_method' not in context.user_data:
         await update.message.reply_text(
@@ -530,8 +575,8 @@ async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     coins = result["coins"]
-    rs = result["rs_amount"]
-    wid = result.get("id", "N/A")
+    rs    = result["rs_amount"]
+    wid   = result.get("id", "N/A")
 
     await update.message.reply_text(
         f"<b>✅ Withdrawal Submitted!</b>\n\n"
@@ -545,9 +590,8 @@ async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode='HTML'
     )
 
-    # Notify admin
     admin_id = int(os.getenv("ADMIN_ID", "7836675446"))
-    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped  = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     try:
         await context.bot.send_message(
             admin_id,
@@ -569,7 +613,6 @@ async def handle_payment_details(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def withdrawal_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User checks their withdrawal status"""
     user_id = update.effective_user.id
     history = await db.get_user_withdrawals(user_id)
 
@@ -585,7 +628,7 @@ async def withdrawal_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for w in history:
         emoji = status_emoji.get(w["status"], "❓")
-        dt = str(w.get("created_at", ""))[:10]
+        dt    = str(w.get("created_at", ""))[:10]
         lines.append(
             f"{emoji} <b>#{w['id']}</b> — ₹{w['rs_amount']:.1f} via {w['method']}\n"
             f"   Status: <i>{w['status']}</i> | {dt}"
@@ -603,11 +646,11 @@ async def withdrawal_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def back_to_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    coins = await db.get_coins(user_id)
-    rs = coins_to_rs(coins)
+    coins   = await db.get_coins(user_id)
+    rs      = coins_to_rs(coins)
 
     await query.edit_message_text(
         f"<b>💳 Your Balance</b>\n\n"
